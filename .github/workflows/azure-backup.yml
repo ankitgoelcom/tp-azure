@@ -1,0 +1,57 @@
+name: Backup Azure App Service Content
+
+on:
+  schedule:
+    # Runs everyday at midnight (00:00 UTC). Adjust cron expression as needed.
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Allows manual trigger via GitHub UI
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1. Checkout the current GitHub repository
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GH_PAT }}
+
+    # 2. Extract FTP credentials from the Azure Publish Profile
+    - name: Parse Azure Publish Profile
+      id: parse_credentials
+      run: |
+        PROFILE='${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}'
+        FTP_URL=$(echo "$PROFILE" | grep -oE 'publishUrl="ftp://[^"]+"' | head -1 | cut -d'"' -f2)
+        FTP_USER=$(echo "$PROFILE" | grep -oE 'userName="[^"]+"' | head -1 | cut -d'"' -f2)
+        FTP_PWD=$(echo "$PROFILE" | grep -oE 'userPWD="[^"]+"' | head -1 | cut -d'"' -f2)
+        
+        echo "::add-mask::$FTP_PWD"
+        echo "ftp_url=$FTP_URL" >> $GITHUB_OUTPUT
+        echo "ftp_user=$FTP_USER" >> $GITHUB_OUTPUT
+        echo "ftp_pwd=$FTP_PWD" >> $GITHUB_OUTPUT
+
+    # 3. Mirror the remote Azure webapp directory using LFTP
+    - name: Download Live Content from Azure
+      run: |
+        sudo apt-get update && sudo apt-get install -y lftp
+        mkdir -p ./azure-content-backup
+        lftp -e "set ftp:ssl-allow true; set ftp:ssl-protect-data true; mirror --verbose --delete /site/wwwroot ./azure-content-backup; quit" \
+          -u "${{ steps.parse_credentials.outputs.ftp_user }}","${{ steps.parse_credentials.outputs.ftp_pwd }}" \
+          "${{ steps.parse_credentials.outputs.ftp_url }}"
+
+    # 4. Commit and push the downloaded files back to GitHub
+    - name: Commit and Push to GitHub
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        
+        git add ./azure-content-backup
+        
+        # Only commit if changes exist to avoid empty workflow failures
+        if ! git diff --cached --quiet; then
+          git commit -m "Automated backup: $(date +'%Y-%m-%d %H:%M:%S')"
+          git push origin main
+        else
+          echo "No content changes detected. Skipping backup commit."
+        fi
