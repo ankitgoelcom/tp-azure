@@ -21,14 +21,12 @@ jobs:
       run: |
         mkdir -p ./azure-content-backup
 
-        # Use Python to accurately strip data structures into environment pipes
-        python3 - << 'EOF'
+        python3 << 'PYTHON_EOF'
         import os
         import xml.etree.ElementTree as ET
 
         profile_xml = os.environ.get('PUBLISH_PROFILE', '')
         
-        # DEBUG: Check if profile exists
         if not profile_xml:
             print('ERROR: AZURE_WEBAPP_PUBLISH_PROFILE secret is empty.')
             exit(1)
@@ -54,5 +52,74 @@ jobs:
             pwd = msdeploy_profile.attrib.get('userPWD', '')
             url = msdeploy_profile.attrib.get('publishUrl', '')
             
-            # DEBUG: Print extracted values
-            print("DEBUG: userName extracted:", "YES" if user else*
+            print("DEBUG: userName extracted:", "YES" if user else "NO (EMPTY)")
+            print("DEBUG: userPWD extracted:", "YES" if pwd else "NO (EMPTY)")
+            print("DEBUG: publishUrl extracted:", "YES" if url else "NO (EMPTY)")
+            print("DEBUG: publishUrl value:", url[:50] if url else "EMPTY")
+            
+            if not user or not pwd or not url:
+                print("ERROR: One or more required attributes are missing!")
+                print(f"  userName: {bool(user)}")
+                print(f"  userPWD: {bool(pwd)}")
+                print(f"  publishUrl: {bool(url)}")
+                print("DEBUG: Available attributes in profile:", list(msdeploy_profile.attrib.keys()))
+                exit(1)
+            
+            host = url.replace('https://', '').replace('http://', '').split(':')[0]
+            
+            print("DEBUG: Extracted host:", host)
+            
+            with open(os.environ['GITHUB_ENV'], 'a') as env_file:
+                env_file.write(f"KUDU_USER={user}\n")
+                env_file.write(f"KUDU_PASS={pwd}\n")
+                env_file.write(f"KUDU_HOST={host}\n")
+            
+            print("DEBUG: Environment variables written to GITHUB_ENV")
+        else:
+            print('ERROR: Could not parse profile nodes.')
+            print("DEBUG: Available tags in root:", [child.tag for child in root])
+            exit(1)
+        PYTHON_EOF
+
+        if [ -f "$GITHUB_ENV" ]; then
+          source "$GITHUB_ENV"
+          echo "DEBUG: GITHUB_ENV sourced successfully"
+        else
+          echo "ERROR: GITHUB_ENV file not found"
+          exit 1
+        fi
+
+        echo "DEBUG: KUDU_HOST value: ${KUDU_HOST}"
+        echo "DEBUG: KUDU_USER value: ${KUDU_USER:0:5}***"
+        echo "DEBUG: KUDU_PASS length: ${#KUDU_PASS}"
+
+        KUDU_URL="https://${KUDU_HOST}"
+        echo "DEBUG: Connecting to Kudu API at: $KUDU_URL/api/zip/site/wwwroot/"
+        
+        echo "DEBUG: Starting curl request..."
+        curl -v -k -fL --connect-timeout 300 --max-time 1800 \
+          -u "${KUDU_USER}:${KUDU_PASS}" \
+          -X GET "${KUDU_URL}/api/zip/site/wwwroot/" \
+          --output site-backup.zip || {
+            echo "ERROR: Backup download rejected by Azure."
+            exit 1
+          }
+
+        echo "DEBUG: Curl completed successfully"
+        echo "Extracting backup payload archive..."
+        unzip -q -o site-backup.zip -d ./azure-content-backup
+        rm site-backup.zip
+        echo "Download and extraction completed successfully."
+
+    - name: Commit and Push to GitHub
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@://github.com"
+        
+        git add ./azure-content-backup
+        if ! git diff --cached --quiet; then
+          git commit -m "Automated Kudu API backup: $(date +'%Y-%m-%d %H:%M:%S')"
+          git push origin main
+        else
+          echo "No deployment changes detected on the App Service. Skipping commit."
+        fi
