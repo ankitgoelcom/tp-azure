@@ -17,17 +17,22 @@ jobs:
       with:
         token: ${{ secrets.GH_PAT }}
 
-    # 2. Extract FTP credentials from the Azure Publish Profile
+    # 2. Extract FTP credentials from the Azure Publish Profile safely
     - name: Parse Azure Publish Profile
       id: parse_credentials
       run: |
         PROFILE='${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}'
-        FTP_URL=$(echo "$PROFILE" | grep -oE 'publishUrl="ftp://[^"]+"' | head -1 | cut -d'"' -f2)
-        FTP_USER=$(echo "$PROFILE" | grep -oE 'userName="[^"]+"' | head -1 | cut -d'"' -f2)
-        FTP_PWD=$(echo "$PROFILE" | grep -oE 'userPWD="[^"]+"' | head -1 | cut -d'"' -f2)
+        
+        # Extract fields using simple grep/sed patterns
+        FTP_URL=$(echo "$PROFILE" | grep -o 'publishUrl="ftp://[^"]*"' | head -n 1 | sed 's/publishUrl="//;s/"//')
+        FTP_USER=$(echo "$PROFILE" | grep -o 'userName="[^"]*"' | head -n 1 | sed 's/userName="//;s/"//')
+        FTP_PWD=$(echo "$PROFILE" | grep -o 'userPWD="[^"]*"' | head -n 1 | sed 's/userPWD="//;s/"//')
+        
+        # Clean the host out of the FTP URL
+        FTP_HOST=$(echo "$FTP_URL" | sed -e 's|ftp://||' -e 's|/.*||')
         
         echo "::add-mask::$FTP_PWD"
-        echo "ftp_url=$FTP_URL" >> $GITHUB_OUTPUT
+        echo "ftp_host=$FTP_HOST" >> $GITHUB_OUTPUT
         echo "ftp_user=$FTP_USER" >> $GITHUB_OUTPUT
         echo "ftp_pwd=$FTP_PWD" >> $GITHUB_OUTPUT
 
@@ -37,19 +42,16 @@ jobs:
         sudo apt-get update && sudo apt-get install -y lftp
         mkdir -p ./azure-content-backup
         
-        # Clean the ftp_url (removes trailing slashes or pathing if any exist)
-        FTP_HOST=$(echo "${{ steps.parse_credentials.outputs.ftp_url }}" | sed -e 's|ftp://||' -e 's|/.*||')
-        
-        # Run LFTP with enhanced connection handling parameters
-        lftp -e " \
-          set ftp:ssl-force true; \
-          set ftp:ssl-protect-data true; \
-          set ssl:verify-certificate no; \
-          set ftp:passive-mode true; \
-          mirror --verbose --delete /site/wwwroot ./azure-content-backup; \
-          quit" \
-          -u "${{ steps.parse_credentials.outputs.ftp_user }}","${{ steps.parse_credentials.outputs.ftp_pwd }}" \
-          "ftp://$FTP_HOST"
+        lftp -u "${{ steps.parse_credentials.outputs.ftp_user }}","${{ steps.parse_credentials.outputs.ftp_pwd }}" \
+             "ftp://${{ steps.parse_credentials.outputs.ftp_host }}" <<EOF
+        set ftp:ssl-allow true
+        set ftp:ssl-force true
+        set ftp:ssl-protect-data true
+        set ssl:verify-certificate no
+        set ftp:passive-mode true
+        mirror --verbose --delete /site/wwwroot ./azure-content-backup
+        quit
+        EOF
 
     # 4. Commit and push the downloaded files back to GitHub
     - name: Commit and Push to GitHub
