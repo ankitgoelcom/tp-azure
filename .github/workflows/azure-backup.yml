@@ -15,7 +15,7 @@ jobs:
       with:
         token: ${{ secrets.GH_PAT }}
 
-    - name: Download Live Content via Kudu REST API
+    - name: Download Live Content via FTP
       env:
         PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
       run: |
@@ -24,7 +24,6 @@ jobs:
         python3 << 'PYTHON_EOF'
         import os
         import xml.etree.ElementTree as ET
-        import urllib.parse
 
         profile_xml = os.environ.get('PUBLISH_PROFILE', '')
         
@@ -41,18 +40,24 @@ jobs:
             print(f"ERROR: Failed to parse XML - {e}")
             exit(1)
         
-        # Try to find MSDeploy profile first (preferred for Kudu API)
-        msdeploy_profile = root.find(".//publishProfile[@publishMethod='MSDeploy']")
+        # Find FTP profile (better for remote file access)
+        ftp_profile = root.find(".//publishProfile[@publishMethod='FTP']")
 
-        if msdeploy_profile is None:
-            print("DEBUG: MSDeploy profile not found, trying generic publishProfile")
-            msdeploy_profile = root.find(".//publishProfile")
+        if ftp_profile is None:
+            print("DEBUG: FTP profile not found, trying MSDeploy")
+            ftp_profile = root.find(".//publishProfile[@publishMethod='MSDeploy']")
 
-        if msdeploy_profile is not None:
-            user = msdeploy_profile.attrib.get('userName', '')
-            pwd = msdeploy_profile.attrib.get('userPWD', '')
-            url = msdeploy_profile.attrib.get('publishUrl', '')
+        if ftp_profile is None:
+            print("DEBUG: MSDeploy profile not found, trying any publishProfile")
+            ftp_profile = root.find(".//publishProfile")
+
+        if ftp_profile is not None:
+            user = ftp_profile.attrib.get('userName', '')
+            pwd = ftp_profile.attrib.get('userPWD', '')
+            url = ftp_profile.attrib.get('publishUrl', '')
+            method = ftp_profile.attrib.get('publishMethod', 'UNKNOWN')
             
+            print(f"DEBUG: Using {method} profile")
             print("DEBUG: userName extracted:", "YES" if user else "NO (EMPTY)")
             print("DEBUG: userPWD extracted:", "YES" if pwd else "NO (EMPTY)")
             print("DEBUG: publishUrl extracted:", "YES" if url else "NO (EMPTY)")
@@ -61,28 +66,24 @@ jobs:
                 print("ERROR: One or more required attributes are missing!")
                 exit(1)
             
-            # Extract host from publishUrl (format: host:port)
-            # Remove protocol prefixes and get just the hostname
-            host = url.replace('https://', '').replace('http://', '').split(':')[0]
+            # For FTP, remove the trailing path from URL
+            ftp_host = url.replace('ftp://', '').replace('https://', '').replace('http://', '')
+            if '/' in ftp_host:
+                ftp_host = ftp_host.split('/')[0]
             
-            print("DEBUG: Extracted host:", host)
-            print("DEBUG: userName (raw):", user)
-            
-            # URL encode the credentials to handle special characters like $
-            encoded_user = urllib.parse.quote(user, safe='')
-            encoded_pwd = urllib.parse.quote(pwd, safe='')
-            
-            print("DEBUG: userName (encoded):", encoded_user[:20] + "***")
+            print(f"DEBUG: Extracted FTP host: {ftp_host}")
+            print("DEBUG: userName value:", user)
             
             # Append variables to the GitHub Action Environment pipe line
             with open(os.environ['GITHUB_ENV'], 'a') as env_file:
-                env_file.write(f"KUDU_USER={encoded_user}\n")
-                env_file.write(f"KUDU_PASS={encoded_pwd}\n")
-                env_file.write(f"KUDU_HOST={host}\n")
+                env_file.write(f"FTP_USER={user}\n")
+                env_file.write(f"FTP_PASS={pwd}\n")
+                env_file.write(f"FTP_HOST={ftp_host}\n")
+                env_file.write(f"FTP_METHOD={method}\n")
             
             print("DEBUG: Environment variables written to GITHUB_ENV")
         else:
-            print('ERROR: Could not parse profile nodes.')
+            print('ERROR: Could not find any publishProfile.')
             exit(1)
         PYTHON_EOF
 
@@ -94,27 +95,34 @@ jobs:
           exit 1
         fi
 
-        echo "DEBUG: KUDU_HOST value: ${KUDU_HOST}"
-        echo "DEBUG: KUDU_USER length: ${#KUDU_USER}"
-        echo "DEBUG: KUDU_PASS length: ${#KUDU_PASS}"
-
-        KUDU_URL="https://${KUDU_HOST}:443"
-        echo "DEBUG: Connecting to Kudu API at: $KUDU_URL/api/zip/site/wwwroot/"
+        echo "DEBUG: FTP_HOST value: ${FTP_HOST}"
+        echo "DEBUG: FTP_USER value: ${FTP_USER}"
+        echo "DEBUG: FTP_METHOD value: ${FTP_METHOD}"
         
-        echo "DEBUG: Starting curl request..."
-        curl -v -k -fL --connect-timeout 300 --max-time 1800 \
-          -u "${KUDU_USER}:${KUDU_PASS}" \
-          -X GET "${KUDU_URL}/api/zip/site/wwwroot/" \
-          --output site-backup.zip || {
-            echo "ERROR: Backup download rejected by Azure."
-            exit 1
+        if [ "$FTP_METHOD" = "FTP" ]; then
+          echo "DEBUG: Using FTP protocol to download files..."
+          lftp -u "${FTP_USER},${FTP_PASS}" ftp://${FTP_HOST} << 'LFTP_EOF'
+          set sftp:auto-confirm yes
+          set ftp:ssl-allow yes
+          mirror -R /site/wwwroot ./azure-content-backup
+          quit
+        LFTP_EOF
+        else
+          echo "DEBUG: Using alternative protocol..."
+          # Fallback: Try with wget/curl for FTP
+          echo "Attempting backup via FTP..."
+          wget -r --ftp-user="${FTP_USER}" --ftp-password="${FTP_PASS}" \
+            ftp://${FTP_HOST}/site/wwwroot/ -P ./azure-content-backup || {
+            echo "WARNING: wget FTP download had issues, trying curl..."
+            curl -fL --ftp-user "${FTP_USER}" --ftp-password "${FTP_PASS}" \
+              -o site-backup.tar ftp://${FTP_HOST}/site/wwwroot/ || {
+              echo "ERROR: Could not download via FTP"
+              exit 1
+            }
           }
+        fi
 
-        echo "DEBUG: Curl completed successfully"
-        echo "Extracting backup payload archive..."
-        unzip -q -o site-backup.zip -d ./azure-content-backup
-        rm site-backup.zip
-        echo "Download and extraction completed successfully."
+        echo "DEBUG: Download completed successfully"
 
     - name: Commit and Push to GitHub
       run: |
@@ -123,7 +131,7 @@ jobs:
         
         git add ./azure-content-backup
         if ! git diff --cached --quiet; then
-          git commit -m "Automated Kudu API backup: $(date +'%Y-%m-%d %H:%M:%S')"
+          git commit -m "Automated Azure App Service backup: $(date +'%Y-%m-%d %H:%M:%S')"
           git push origin main
         else
           echo "No deployment changes detected on the App Service. Skipping commit."
