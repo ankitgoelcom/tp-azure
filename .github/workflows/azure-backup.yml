@@ -2,30 +2,26 @@ name: Backup Azure App Service Content
 
 on:
   schedule:
-    # Runs automatically every day at midnight (00:00 UTC)
     - cron: '0 0 * * *'
-  workflow_dispatch: # Allows manual trigger via the GitHub UI
+  workflow_dispatch:
 
 jobs:
   backup:
     runs-on: ubuntu-latest
 
     steps:
-    # 1. Checkout the current GitHub repository
     - name: Checkout Repository
       uses: actions/checkout@v6
       with:
         token: ${{ secrets.GH_PAT }}
 
-    # 2. Extract Credentials using Python and Download Live Content using Kudu Zip API
     - name: Download Live Content via Kudu REST API
       env:
         PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
       run: |
-        # Ensure target directory exists
         mkdir -p ./azure-content-backup
 
-        # Use Python to safely parse the XML profile string and extract credentials
+        # Use Python to accurately strip data structures into environment pipes
         python3 - << 'EOF'
         import os
         import xml.etree.ElementTree as ET
@@ -36,12 +32,9 @@ jobs:
             exit(1)
 
         root = ET.fromstring(profile_xml)
-        
-        # Find the MSDeploy publishing method profile block
         msdeploy_profile = root.find(".//publishProfile[@publishMethod='MSDeploy']")
 
         if msdeploy_profile is None:
-            # Fallback to alternative method name if MSDeploy tag isn't explicitly defined
             msdeploy_profile = root.find(".//publishProfile")
 
         if msdeploy_profile is not None:
@@ -49,50 +42,42 @@ jobs:
             pwd = msdeploy_profile.attrib.get('userPWD', '')
             url = msdeploy_profile.attrib.get('publishUrl', '')
             
-            # Strip protocol out and isolate just the domain host string correctly
+            # Extract only the host part
             host = url.replace('https://', '').replace('http://', '').split(':')[0]
             
-            with open('kudu_credentials.env', 'w') as f:
-                f.write(f'KUDU_USER={user}\n')
-                f.write(f'KUDU_PASS={pwd}\n')
-                f.write(f'KUDU_HOST={host}\n')
+            # Append variables to the GitHub Action Environment pipe line
+            with open(os.environ['GITHUB_ENV'], 'a') as env_file:
+                env_file.write(f"KUDU_USER={user}\n")
+                env_file.write(f"KUDU_PASS={pwd}\n")
+                env_file.write(f"KUDU_HOST={host}\n")
         else:
-            print('ERROR: Could not parse valid publish settings profile structural nodes.')
+            print('ERROR: Could not parse profile nodes.')
             exit(1)
         EOF
 
-        # Load the extracted environmental variables safely into the local runner shell
-        source kudu_credentials.env
-        rm kudu_credentials.env
-
-        # Build full clean target endpoint url path
         KUDU_URL="https://$KUDU_HOST"
-
         echo "Connecting to Kudu API at: $KUDU_URL/api/zip/site/wwwroot/"
         
-        # Download with fail, location, and connect-timeout optimizations to avoid quiet text drops
-        curl -k -fL --connect-timeout 300 --max-time 1800 -u "$KUDU_USER:$KUDU_PASS" -X GET "$KUDU_URL/api/zip/site/wwwroot/" --output site-backup.zip || {
-          echo "ERROR: Curl download failed. Displaying raw server response content if available:"
-          cat site-backup.zip 2>/dev/null || true
-          exit 1
-        }
+        # Download the entire directory structure securely 
+        curl -k -fL --connect-timeout 300 --max-time 1800 \
+          -u "$KUDU_USER:$KUDU_PASS" \
+          -X GET "$KUDU_URL/api/zip/site/wwwroot/" \
+          --output site-backup.zip || {
+            echo "ERROR: Backup download rejected by Azure."
+            exit 1
+          }
 
         echo "Extracting backup payload archive..."
-        # Extract files cleanly inside your local backup deployment storage folder
         unzip -q -o site-backup.zip -d ./azure-content-backup
         rm site-backup.zip
-        
         echo "Download and extraction completed successfully."
 
-    # 3. Commit and push the downloaded files back to GitHub
     - name: Commit and Push to GitHub
       run: |
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@://github.com"
         
         git add ./azure-content-backup
-        
-        # Check for modifications to avoid throwing errors on empty commits
         if ! git diff --cached --quiet; then
           git commit -m "Automated Kudu API backup: $(date +'%Y-%m-%d %H:%M:%S')"
           git push origin main
