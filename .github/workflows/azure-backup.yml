@@ -36,9 +36,20 @@ jobs:
       run: |
         sudo apt-get update && sudo apt-get install -y lftp
         mkdir -p ./azure-content-backup
-        lftp -e "set ftp:ssl-allow true; set ftp:ssl-protect-data true; mirror --verbose --delete /site/wwwroot ./azure-content-backup; quit" \
+        
+        # Clean the ftp_url (removes trailing slashes or pathing if any exist)
+        FTP_HOST=$(echo "${{ steps.parse_credentials.outputs.ftp_url }}" | sed -e 's|ftp://||' -e 's|/.*||')
+        
+        # Run LFTP with enhanced connection handling parameters
+        lftp -e " \
+          set ftp:ssl-force true; \
+          set ftp:ssl-protect-data true; \
+          set ssl:verify-certificate no; \
+          set ftp:passive-mode true; \
+          mirror --verbose --delete /site/wwwroot ./azure-content-backup; \
+          quit" \
           -u "${{ steps.parse_credentials.outputs.ftp_user }}","${{ steps.parse_credentials.outputs.ftp_pwd }}" \
-          "${{ steps.parse_credentials.outputs.ftp_url }}"
+          "ftp://$FTP_HOST"
 
     # 4. Commit and push the downloaded files back to GitHub
     - name: Commit and Push to GitHub
