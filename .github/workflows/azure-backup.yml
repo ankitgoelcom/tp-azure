@@ -24,7 +24,7 @@ jobs:
         python3 << 'PYTHON_EOF'
         import os
         import xml.etree.ElementTree as ET
-        import base64
+        import urllib.parse
 
         profile_xml = os.environ.get('PUBLISH_PROFILE', '')
         
@@ -59,31 +59,30 @@ jobs:
             
             if not user or not pwd or not url:
                 print("ERROR: One or more required attributes are missing!")
-                print(f"  userName present: {bool(user)}")
-                print(f"  userPWD present: {bool(pwd)}")
-                print(f"  publishUrl present: {bool(url)}")
-                print("DEBUG: Available attributes in profile:", list(msdeploy_profile.attrib.keys()))
                 exit(1)
             
             # Extract host from publishUrl (format: host:port)
+            # Remove protocol prefixes and get just the hostname
             host = url.replace('https://', '').replace('http://', '').split(':')[0]
             
             print("DEBUG: Extracted host:", host)
-            print("DEBUG: userName value:", user[:10] + "***" if len(user) > 10 else user)
+            print("DEBUG: userName (raw):", user)
             
-            # Create base64 encoded credentials for curl
-            credentials = f"{user}:{pwd}"
+            # URL encode the credentials to handle special characters like $
+            encoded_user = urllib.parse.quote(user, safe='')
+            encoded_pwd = urllib.parse.quote(pwd, safe='')
+            
+            print("DEBUG: userName (encoded):", encoded_user[:20] + "***")
             
             # Append variables to the GitHub Action Environment pipe line
             with open(os.environ['GITHUB_ENV'], 'a') as env_file:
-                env_file.write(f"KUDU_USER={user}\n")
-                env_file.write(f"KUDU_PASS={pwd}\n")
+                env_file.write(f"KUDU_USER={encoded_user}\n")
+                env_file.write(f"KUDU_PASS={encoded_pwd}\n")
                 env_file.write(f"KUDU_HOST={host}\n")
             
             print("DEBUG: Environment variables written to GITHUB_ENV")
         else:
             print('ERROR: Could not parse profile nodes.')
-            print("DEBUG: Available tags in root:", [child.tag for child in root])
             exit(1)
         PYTHON_EOF
 
@@ -96,19 +95,18 @@ jobs:
         fi
 
         echo "DEBUG: KUDU_HOST value: ${KUDU_HOST}"
-        echo "DEBUG: KUDU_USER first 10 chars: ${KUDU_USER:0:10}***"
+        echo "DEBUG: KUDU_USER length: ${#KUDU_USER}"
         echo "DEBUG: KUDU_PASS length: ${#KUDU_PASS}"
 
-        KUDU_URL="https://${KUDU_HOST}"
+        KUDU_URL="https://${KUDU_HOST}:443"
         echo "DEBUG: Connecting to Kudu API at: $KUDU_URL/api/zip/site/wwwroot/"
         
-        echo "DEBUG: Starting curl request with proper authentication..."
+        echo "DEBUG: Starting curl request..."
         curl -v -k -fL --connect-timeout 300 --max-time 1800 \
           -u "${KUDU_USER}:${KUDU_PASS}" \
-          -X GET "${KUDU_URL}:443/api/zip/site/wwwroot/" \
+          -X GET "${KUDU_URL}/api/zip/site/wwwroot/" \
           --output site-backup.zip || {
             echo "ERROR: Backup download rejected by Azure."
-            echo "DEBUG: Check that AZURE_WEBAPP_PUBLISH_PROFILE contains valid credentials"
             exit 1
           }
 
