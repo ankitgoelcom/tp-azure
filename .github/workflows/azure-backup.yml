@@ -2,57 +2,72 @@ name: Backup Azure App Service Content
 
 on:
   schedule:
-    # Runs everyday at midnight (00:00 UTC). Adjust cron expression as needed.
+    # Runs automatically every day at midnight (00:00 UTC)
     - cron: '0 0 * * *'
-  workflow_dispatch: # Allows manual trigger via GitHub UI
+  workflow_dispatch: # Allows manual trigger via the GitHub UI
 
 jobs:
   backup:
     runs-on: ubuntu-latest
 
     steps:
-    # 1. Checkout the current GitHub repository
+    # 1. Checkout the current GitHub repository using Node 24 compliant action
     - name: Checkout Repository
       uses: actions/checkout@v6
       with:
         token: ${{ secrets.GH_PAT }}
 
-    # 2. Download Live Content from Azure using Kudu Zip API
-    - name: Download Live Content via REST API
+    # 2. Extract Credentials and Download Live Content using Kudu Zip API
+    - name: Download Live Content via Kudu REST API
       run: |
-        # Extract basic auth credentials from Publish Profile
-        PROFILE='${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}'
-        KUDU_URL=$(echo "$PROFILE" | grep -o 'publishUrl="https://[^"]*"' | head -n 1 | sed 's/publishUrl="//;s/"//')
-        USER=$(echo "$PROFILE" | grep -o 'userName="[^"]*"' | head -n 1 | sed 's/userName="//;s/"//')
-        PASS=$(echo "$PROFILE" | grep -o 'userPWD="[^"]*"' | head -n 1 | sed 's/userPWD="//;s/"//')
-
-        # Create target backup folder if it doesn't exist
+        # Ensure target directory exists
         mkdir -p ./azure-content-backup
 
-        echo "Connecting to Kudu API to package and download site contents..."
+        # Put publish profile into a temporary file for structured XML parsing
+        echo "${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}" > profile.xml
+
+        # Extract values cleanly using standard XPath expressions targeting MSDeploy/Kudu method
+        USER=$(xmllint --xpath 'string(//publishProfile[@publishMethod="MSDeploy"]/@userName)' profile.xml)
+        PASS=$(xmllint --xpath 'string(//publishProfile[@publishMethod="MSDeploy"]/@userPWD)' profile.xml)
+        RAW_URL=$(xmllint --xpath 'string(//publishProfile[@publishMethod="MSDeploy"]/@publishUrl)' profile.xml)
+
+        # Cleanup the temp credentials file immediately
+        rm profile.xml
+
+        # Format URL: strip out any hardcoded port variations and prefix with secure HTTPS
+        CLEAN_HOST=$(echo "$RAW_URL" | sed -e 's|https://||' -e 's|:443||')
+        KUDU_URL="https://$CLEAN_HOST"
+
+        # Check if URL extraction worked successfully to prevent blind script failure
+        if [ -z "$CLEAN_HOST" ]; then
+          echo "Error: Failed to extract Kudu host from publish profile XML structure."
+          exit 1
+        fi
+
+        echo "Connecting to Kudu API at: $KUDU_URL/api/zip/site/wwwroot/"
         
-        # Download the entire wwwroot directory as a zip file via secure HTTPS
+        # Download the entire wwwroot path directory as a zipped payload package 
         curl -k -u "$USER:$PASS" -X GET "$KUDU_URL/api/zip/site/wwwroot/" --output site-backup.zip
 
-        echo "Extracting content..."
-        # Extract the files, overwriting existing files, and clean up the zip archive
-        unzip -o -q site-backup.zip -d ./azure-content-backup
+        echo "Extracting backup payload archive..."
+        # Extract files cleanly directly over your repository target directory
+        unzip -q -o site-backup.zip -d ./azure-content-backup
         rm site-backup.zip
         
-        echo "Download and extraction complete."
+        echo "Download and extraction completed successfully."
 
     # 3. Commit and push the downloaded files back to GitHub
     - name: Commit and Push to GitHub
       run: |
         git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@://github.com"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
         
         git add ./azure-content-backup
         
-        # Only commit if changes exist to avoid empty workflow failures
+        # Check for modifications to avoid throwing errors on empty commits
         if ! git diff --cached --quiet; then
-          git commit -m "Automated backup: $(date +'%Y-%m-%d %H:%M:%S')"
+          git commit -m "Automated Kudu API backup: $(date +'%Y-%m-%d %H:%M:%S')"
           git push origin main
         else
-          echo "No content changes detected. Skipping backup commit."
+          echo "No deployment changes detected on the App Service. Skipping commit."
         fi
