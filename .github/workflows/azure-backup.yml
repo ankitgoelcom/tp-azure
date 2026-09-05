@@ -74,57 +74,38 @@ jobs:
           exit 1
         fi
 
-        echo "DEBUG: Starting FTP download..."
         echo "DEBUG: FTP_URL = ${FTP_URL}"
         echo "DEBUG: FTP_USER = ${FTP_USER:0:10}***"
         
-        # Create a temporary directory for downloads
-        mkdir -p ./ftp-temp
-        cd ./ftp-temp
+        # Install lftp for better FTP handling
+        echo "Installing lftp..."
+        sudo apt-get update -qq > /dev/null 2>&1
+        sudo apt-get install -y lftp > /dev/null 2>&1
         
-        # Use curl to download via FTP with wildcard
-        # The URL should be: ftp://user:pass@host/path/*
-        FTP_DOWNLOAD_URL="${FTP_URL}*"
+        # Use lftp for recursive mirror download
+        echo "Starting recursive FTP download from ${FTP_URL}..."
         
-        echo "Downloading from FTP..."
-        curl -fL --user "${FTP_USER}:${FTP_PASS}" \
-          "${FTP_DOWNLOAD_URL}" \
-          --remote-name --remote-time -R || {
-            echo "WARNING: Direct wildcard download failed, trying alternative method..."
-        }
+        # Create lftp script for reliable FTP operations
+        lftp << LFTP_SCRIPT
+        set ftp:ssl-allow no
+        set ftp:passive-mode on
+        open -u "${FTP_USER},${FTP_PASS}" "${FTP_URL%/*}"
+        mirror -v "${FTP_URL##*/}" ./azure-content-backup
+        quit
+        LFTP_SCRIPT
         
-        # List files to verify
-        if [ $(ls -1 2>/dev/null | wc -l) -gt 0 ]; then
-          echo "DEBUG: Files downloaded successfully"
-          ls -la
+        RESULT=$?
+        
+        if [ $RESULT -eq 0 ]; then
+          FILE_COUNT=$(find ./azure-content-backup -type f | wc -l)
+          echo "✓ Download completed successfully"
+          echo "Files downloaded: $FILE_COUNT"
+          if [ $FILE_COUNT -eq 0 ]; then
+            echo "WARNING: Directory is empty, verifying FTP connection..."
+          fi
         else
-          echo "WARNING: No files found, attempting recursive download with wget..."
-          cd ..
-          
-          # Try using wget for recursive download
-          wget -r --ftp-user="${FTP_USER}" --ftp-password="${FTP_PASS}" \
-            --no-parent --cut-dirs=2 \
-            "${FTP_URL}" -P ./azure-content-backup 2>&1 | head -50 || {
-            echo "WARNING: wget also failed"
-          }
-        fi
-        
-        # Move downloaded files to backup directory
-        if [ -d "ftp-temp" ] && [ $(ls -1 ftp-temp 2>/dev/null | wc -l) -gt 0 ]; then
-          mv ./ftp-temp/* ./azure-content-backup/ 2>/dev/null || true
-          rm -rf ./ftp-temp
-        fi
-        
-        cd ..
-        
-        # Verify backup directory has content
-        if [ $(find ./azure-content-backup -type f | wc -l) -gt 0 ]; then
-          echo "✓ Backup completed successfully"
-          echo "Files downloaded: $(find ./azure-content-backup -type f | wc -l)"
-        else
-          echo "✗ No files were downloaded - this may indicate a connection issue"
-          echo "Checking FTP connectivity..."
-          echo "quit" | curl -v --user "${FTP_USER}:${FTP_PASS}" ftp://${FTP_URL%/*} 2>&1 | head -30 || true
+          echo "ERROR: FTP download failed with code $RESULT"
+          exit 1
         fi
 
     - name: Commit and Push to GitHub
