@@ -17,47 +17,35 @@ jobs:
       with:
         token: ${{ secrets.GH_PAT }}
 
-    # 2. Extract FTP credentials from the Azure Publish Profile safely
-    - name: Parse Azure Publish Profile
-      id: parse_credentials
+    # 2. Download Live Content from Azure using Kudu Zip API
+    - name: Download Live Content via REST API
       run: |
+        # Extract basic auth credentials from Publish Profile
         PROFILE='${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}'
-        
-        # Extract fields using simple grep/sed patterns
-        FTP_URL=$(echo "$PROFILE" | grep -o 'publishUrl="ftp://[^"]*"' | head -n 1 | sed 's/publishUrl="//;s/"//')
-        FTP_USER=$(echo "$PROFILE" | grep -o 'userName="[^"]*"' | head -n 1 | sed 's/userName="//;s/"//')
-        FTP_PWD=$(echo "$PROFILE" | grep -o 'userPWD="[^"]*"' | head -n 1 | sed 's/userPWD="//;s/"//')
-        
-        # Clean the host out of the FTP URL
-        FTP_HOST=$(echo "$FTP_URL" | sed -e 's|ftp://||' -e 's|/.*||')
-        
-        echo "::add-mask::$FTP_PWD"
-        echo "ftp_host=$FTP_HOST" >> $GITHUB_OUTPUT
-        echo "ftp_user=$FTP_USER" >> $GITHUB_OUTPUT
-        echo "ftp_pwd=$FTP_PWD" >> $GITHUB_OUTPUT
+        KUDU_URL=$(echo "$PROFILE" | grep -o 'publishUrl="https://[^"]*"' | head -n 1 | sed 's/publishUrl="//;s/"//')
+        USER=$(echo "$PROFILE" | grep -o 'userName="[^"]*"' | head -n 1 | sed 's/userName="//;s/"//')
+        PASS=$(echo "$PROFILE" | grep -o 'userPWD="[^"]*"' | head -n 1 | sed 's/userPWD="//;s/"//')
 
-    # 3. Mirror the remote Azure webapp directory using LFTP
-    - name: Download Live Content from Azure
-      run: |
-        sudo apt-get update && sudo apt-get install -y lftp
+        # Create target backup folder if it doesn't exist
         mkdir -p ./azure-content-backup
-        
-        lftp -u "${{ steps.parse_credentials.outputs.ftp_user }}","${{ steps.parse_credentials.outputs.ftp_pwd }}" \
-             "ftp://${{ steps.parse_credentials.outputs.ftp_host }}" <<EOF
-        set ftp:ssl-allow true
-        set ftp:ssl-force true
-        set ftp:ssl-protect-data true
-        set ssl:verify-certificate no
-        set ftp:passive-mode true
-        mirror --verbose --delete /site/wwwroot ./azure-content-backup
-        quit
-        EOF
 
-    # 4. Commit and push the downloaded files back to GitHub
+        echo "Connecting to Kudu API to package and download site contents..."
+        
+        # Download the entire wwwroot directory as a zip file via secure HTTPS
+        curl -k -u "$USER:$PASS" -X GET "$KUDU_URL/api/zip/site/wwwroot/" --output site-backup.zip
+
+        echo "Extracting content..."
+        # Extract the files, overwriting existing files, and clean up the zip archive
+        unzip -o -q site-backup.zip -d ./azure-content-backup
+        rm site-backup.zip
+        
+        echo "Download and extraction complete."
+
+    # 3. Commit and push the downloaded files back to GitHub
     - name: Commit and Push to GitHub
       run: |
         git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git config --global user.email "github-actions[bot]@://github.com"
         
         git add ./azure-content-backup
         
