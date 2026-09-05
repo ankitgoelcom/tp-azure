@@ -24,6 +24,7 @@ jobs:
         python3 << 'PYTHON_EOF'
         import os
         import xml.etree.ElementTree as ET
+        import base64
 
         profile_xml = os.environ.get('PUBLISH_PROFILE', '')
         
@@ -32,7 +33,6 @@ jobs:
             exit(1)
         
         print("DEBUG: Profile XML length:", len(profile_xml))
-        print("DEBUG: Profile XML preview (first 200 chars):", profile_xml[:200])
 
         try:
             root = ET.fromstring(profile_xml)
@@ -41,6 +41,7 @@ jobs:
             print(f"ERROR: Failed to parse XML - {e}")
             exit(1)
         
+        # Try to find MSDeploy profile first (preferred for Kudu API)
         msdeploy_profile = root.find(".//publishProfile[@publishMethod='MSDeploy']")
 
         if msdeploy_profile is None:
@@ -55,20 +56,25 @@ jobs:
             print("DEBUG: userName extracted:", "YES" if user else "NO (EMPTY)")
             print("DEBUG: userPWD extracted:", "YES" if pwd else "NO (EMPTY)")
             print("DEBUG: publishUrl extracted:", "YES" if url else "NO (EMPTY)")
-            print("DEBUG: publishUrl value:", url[:50] if url else "EMPTY")
             
             if not user or not pwd or not url:
                 print("ERROR: One or more required attributes are missing!")
-                print(f"  userName: {bool(user)}")
-                print(f"  userPWD: {bool(pwd)}")
-                print(f"  publishUrl: {bool(url)}")
+                print(f"  userName present: {bool(user)}")
+                print(f"  userPWD present: {bool(pwd)}")
+                print(f"  publishUrl present: {bool(url)}")
                 print("DEBUG: Available attributes in profile:", list(msdeploy_profile.attrib.keys()))
                 exit(1)
             
+            # Extract host from publishUrl (format: host:port)
             host = url.replace('https://', '').replace('http://', '').split(':')[0]
             
             print("DEBUG: Extracted host:", host)
+            print("DEBUG: userName value:", user[:10] + "***" if len(user) > 10 else user)
             
+            # Create base64 encoded credentials for curl
+            credentials = f"{user}:{pwd}"
+            
+            # Append variables to the GitHub Action Environment pipe line
             with open(os.environ['GITHUB_ENV'], 'a') as env_file:
                 env_file.write(f"KUDU_USER={user}\n")
                 env_file.write(f"KUDU_PASS={pwd}\n")
@@ -90,18 +96,19 @@ jobs:
         fi
 
         echo "DEBUG: KUDU_HOST value: ${KUDU_HOST}"
-        echo "DEBUG: KUDU_USER value: ${KUDU_USER:0:5}***"
+        echo "DEBUG: KUDU_USER first 10 chars: ${KUDU_USER:0:10}***"
         echo "DEBUG: KUDU_PASS length: ${#KUDU_PASS}"
 
         KUDU_URL="https://${KUDU_HOST}"
         echo "DEBUG: Connecting to Kudu API at: $KUDU_URL/api/zip/site/wwwroot/"
         
-        echo "DEBUG: Starting curl request..."
+        echo "DEBUG: Starting curl request with proper authentication..."
         curl -v -k -fL --connect-timeout 300 --max-time 1800 \
           -u "${KUDU_USER}:${KUDU_PASS}" \
-          -X GET "${KUDU_URL}/api/zip/site/wwwroot/" \
+          -X GET "${KUDU_URL}:443/api/zip/site/wwwroot/" \
           --output site-backup.zip || {
             echo "ERROR: Backup download rejected by Azure."
+            echo "DEBUG: Check that AZURE_WEBAPP_PUBLISH_PROFILE contains valid credentials"
             exit 1
           }
 
