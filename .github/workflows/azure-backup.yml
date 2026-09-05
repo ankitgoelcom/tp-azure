@@ -27,14 +27,26 @@ jobs:
         import xml.etree.ElementTree as ET
 
         profile_xml = os.environ.get('PUBLISH_PROFILE', '')
+        
+        # DEBUG: Check if profile exists
         if not profile_xml:
             print('ERROR: AZURE_WEBAPP_PUBLISH_PROFILE secret is empty.')
             exit(1)
+        
+        print("DEBUG: Profile XML length:", len(profile_xml))
+        print("DEBUG: Profile XML preview (first 200 chars):", profile_xml[:200])
 
-        root = ET.fromstring(profile_xml)
+        try:
+            root = ET.fromstring(profile_xml)
+            print("DEBUG: XML parsed successfully")
+        except ET.ParseError as e:
+            print(f"ERROR: Failed to parse XML - {e}")
+            exit(1)
+        
         msdeploy_profile = root.find(".//publishProfile[@publishMethod='MSDeploy']")
 
         if msdeploy_profile is None:
+            print("DEBUG: MSDeploy profile not found, trying generic publishProfile")
             msdeploy_profile = root.find(".//publishProfile")
 
         if msdeploy_profile is not None:
@@ -42,50 +54,5 @@ jobs:
             pwd = msdeploy_profile.attrib.get('userPWD', '')
             url = msdeploy_profile.attrib.get('publishUrl', '')
             
-            # Extract only the host part
-            host = url.replace('https://', '').replace('http://', '').split(':')[0]
-            
-            # Append variables to the GitHub Action Environment pipe line
-            with open(os.environ['GITHUB_ENV'], 'a') as env_file:
-                env_file.write(f"KUDU_USER={user}\n")
-                env_file.write(f"KUDU_PASS={pwd}\n")
-                env_file.write(f"KUDU_HOST={host}\n")
-        else:
-            print('ERROR: Could not parse profile nodes.')
-            exit(1)
-        EOF
-
-        # Source the environment variables set by Python script
-        if [ -f "$GITHUB_ENV" ]; then
-          source "$GITHUB_ENV"
-        fi
-
-        KUDU_URL="https://${KUDU_HOST}"
-        echo "Connecting to Kudu API at: $KUDU_URL/api/zip/site/wwwroot/"
-        
-        # Download the entire directory structure securely 
-        curl -k -fL --connect-timeout 300 --max-time 1800 \
-          -u "${KUDU_USER}:${KUDU_PASS}" \
-          -X GET "${KUDU_URL}/api/zip/site/wwwroot/" \
-          --output site-backup.zip || {
-            echo "ERROR: Backup download rejected by Azure."
-            exit 1
-          }
-
-        echo "Extracting backup payload archive..."
-        unzip -q -o site-backup.zip -d ./azure-content-backup
-        rm site-backup.zip
-        echo "Download and extraction completed successfully."
-
-    - name: Commit and Push to GitHub
-      run: |
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@://github.com"
-        
-        git add ./azure-content-backup
-        if ! git diff --cached --quiet; then
-          git commit -m "Automated Kudu API backup: $(date +'%Y-%m-%d %H:%M:%S')"
-          git push origin main
-        else
-          echo "No deployment changes detected on the App Service. Skipping commit."
-        fi
+            # DEBUG: Print extracted values
+            print("DEBUG: userName extracted:", "YES" if user else*
