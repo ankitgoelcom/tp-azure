@@ -30,8 +30,6 @@ jobs:
         if not profile_xml:
             print('ERROR: AZURE_WEBAPP_PUBLISH_PROFILE secret is empty.')
             exit(1)
-        
-        print("DEBUG: Profile XML length:", len(profile_xml))
 
         try:
             root = ET.fromstring(profile_xml)
@@ -40,114 +38,93 @@ jobs:
             print(f"ERROR: Failed to parse XML - {e}")
             exit(1)
         
-        # Find FTP profile (better for remote file access)
+        # Find FTP profile
         ftp_profile = root.find(".//publishProfile[@publishMethod='FTP']")
-
-        if ftp_profile is None:
-            print("DEBUG: FTP profile not found, trying any publishProfile")
-            ftp_profile = root.find(".//publishProfile")
 
         if ftp_profile is not None:
             user = ftp_profile.attrib.get('userName', '')
             pwd = ftp_profile.attrib.get('userPWD', '')
             url = ftp_profile.attrib.get('publishUrl', '')
-            method = ftp_profile.attrib.get('publishMethod', 'UNKNOWN')
             
-            print(f"DEBUG: Using {method} profile")
-            print("DEBUG: userName extracted:", "YES" if user else "NO (EMPTY)")
-            print("DEBUG: userPWD extracted:", "YES" if pwd else "NO (EMPTY)")
-            print("DEBUG: publishUrl extracted:", "YES" if url else "NO (EMPTY)")
+            print(f"DEBUG: Found FTP profile")
+            print(f"DEBUG: User: {user}")
+            print(f"DEBUG: URL: {url}")
             
             if not user or not pwd or not url:
-                print("ERROR: One or more required attributes are missing!")
+                print("ERROR: Missing FTP credentials")
                 exit(1)
-            
-            print(f"DEBUG: Raw publishUrl: {url}")
-            print(f"DEBUG: Raw userName: {user}")
             
             # Append variables to the GitHub Action Environment pipe line
             with open(os.environ['GITHUB_ENV'], 'a') as env_file:
                 env_file.write(f"FTP_USER={user}\n")
                 env_file.write(f"FTP_PASS={pwd}\n")
                 env_file.write(f"FTP_URL={url}\n")
-                env_file.write(f"FTP_METHOD={method}\n")
             
-            print("DEBUG: Environment variables written to GITHUB_ENV")
+            print("DEBUG: Environment variables written")
         else:
-            print('ERROR: Could not find any publishProfile.')
+            print('ERROR: Could not find FTP profile.')
             exit(1)
         PYTHON_EOF
 
         if [ -f "$GITHUB_ENV" ]; then
           source "$GITHUB_ENV"
-          echo "DEBUG: GITHUB_ENV sourced successfully"
+          echo "DEBUG: Environment loaded"
         else
           echo "ERROR: GITHUB_ENV file not found"
           exit 1
         fi
 
-        echo "DEBUG: FTP_URL value: ${FTP_URL}"
-        echo "DEBUG: FTP_USER value: ${FTP_USER}"
-        echo "DEBUG: FTP_METHOD value: ${FTP_METHOD}"
+        echo "DEBUG: Starting FTP download..."
+        echo "DEBUG: FTP_URL = ${FTP_URL}"
+        echo "DEBUG: FTP_USER = ${FTP_USER:0:10}***"
         
-        # Install rclone for better FTP support
-        echo "Installing rclone for FTP backup..."
-        curl -sSL https://rclone.org/install.sh | sudo bash || {
-          echo "WARNING: rclone installation failed, using curl as fallback"
+        # Create a temporary directory for downloads
+        mkdir -p ./ftp-temp
+        cd ./ftp-temp
+        
+        # Use curl to download via FTP with wildcard
+        # The URL should be: ftp://user:pass@host/path/*
+        FTP_DOWNLOAD_URL="${FTP_URL}*"
+        
+        echo "Downloading from FTP..."
+        curl -fL --user "${FTP_USER}:${FTP_PASS}" \
+          "${FTP_DOWNLOAD_URL}" \
+          --remote-name --remote-time -R || {
+            echo "WARNING: Direct wildcard download failed, trying alternative method..."
         }
         
-        if command -v rclone &> /dev/null; then
-          echo "DEBUG: Using rclone for FTP sync..."
-          
-          # Create rclone config
-          mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf << RCLONE_CONF
-        [azure_ftp]
-        type = ftp
-        host = ${FTP_URL%/*}
-        user = ${FTP_USER}
-        pass = ${FTP_PASS}
-        RCLONE_CONF
-          
-          # Sync files
-          rclone sync azure_ftp:/site/wwwroot ./azure-content-backup -v || {
-            echo "ERROR: rclone sync failed"
-            exit 1
-          }
+        # List files to verify
+        if [ $(ls -1 2>/dev/null | wc -l) -gt 0 ]; then
+          echo "DEBUG: Files downloaded successfully"
+          ls -la
         else
-          echo "DEBUG: Using curl for FTP download (recursive)..."
+          echo "WARNING: No files found, attempting recursive download with wget..."
+          cd ..
           
-          # Use curl to list and download files via FTP
-          curl -fL --ftp-ssl --ssl-reqd \
-            -u "${FTP_USER}:${FTP_PASS}" \
-            "${FTP_URL}" \
-            -o site-backup.tar 2>&1 | head -20 || {
-            echo "WARNING: Curl direct download failed, trying alternative..."
-            
-            # Try using lftp with apt install
-            echo "Attempting to install and use lftp..."
-            sudo apt-get update -qq && sudo apt-get install -y lftp > /dev/null 2>&1
-            
-            if command -v lftp &> /dev/null; then
-              lftp -u "${FTP_USER},${FTP_PASS}" "${FTP_URL%/*}" << LFTP_CMD
-              set sftp:auto-confirm yes
-              mirror -R /site/wwwroot ./azure-content-backup
-              quit
-        LFTP_CMD
-            else
-              echo "ERROR: Could not install lftp and curl FTP failed"
-              exit 1
-            fi
+          # Try using wget for recursive download
+          wget -r --ftp-user="${FTP_USER}" --ftp-password="${FTP_PASS}" \
+            --no-parent --cut-dirs=2 \
+            "${FTP_URL}" -P ./azure-content-backup 2>&1 | head -50 || {
+            echo "WARNING: wget also failed"
           }
         fi
-
-        echo "DEBUG: Download process completed"
         
-        # If we got a tar file, extract it
-        if [ -f site-backup.tar ]; then
-          echo "Extracting tar archive..."
-          tar -xf site-backup.tar -C ./azure-content-backup || echo "Note: tar extraction had issues but continuing..."
-          rm -f site-backup.tar
+        # Move downloaded files to backup directory
+        if [ -d "ftp-temp" ] && [ $(ls -1 ftp-temp 2>/dev/null | wc -l) -gt 0 ]; then
+          mv ./ftp-temp/* ./azure-content-backup/ 2>/dev/null || true
+          rm -rf ./ftp-temp
+        fi
+        
+        cd ..
+        
+        # Verify backup directory has content
+        if [ $(find ./azure-content-backup -type f | wc -l) -gt 0 ]; then
+          echo "✓ Backup completed successfully"
+          echo "Files downloaded: $(find ./azure-content-backup -type f | wc -l)"
+        else
+          echo "✗ No files were downloaded - this may indicate a connection issue"
+          echo "Checking FTP connectivity..."
+          echo "quit" | curl -v --user "${FTP_USER}:${FTP_PASS}" ftp://${FTP_URL%/*} 2>&1 | head -30 || true
         fi
 
     - name: Commit and Push to GitHub
