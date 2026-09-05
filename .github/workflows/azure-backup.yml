@@ -55,13 +55,18 @@ jobs:
             exit(1)
         EOF
 
-        KUDU_URL="https://$KUDU_HOST"
+        # Source the environment variables set by Python script
+        if [ -f "$GITHUB_ENV" ]; then
+          source "$GITHUB_ENV"
+        fi
+
+        KUDU_URL="https://${KUDU_HOST}"
         echo "Connecting to Kudu API at: $KUDU_URL/api/zip/site/wwwroot/"
         
         # Download the entire directory structure securely 
         curl -k -fL --connect-timeout 300 --max-time 1800 \
-          -u "$KUDU_USER:$KUDU_PASS" \
-          -X GET "$KUDU_URL/api/zip/site/wwwroot/" \
+          -u "${KUDU_USER}:${KUDU_PASS}" \
+          -X GET "${KUDU_URL}/api/zip/site/wwwroot/" \
           --output site-backup.zip || {
             echo "ERROR: Backup download rejected by Azure."
             exit 1
