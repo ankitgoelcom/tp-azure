@@ -35,4 +35,83 @@ jobs:
             root = ET.fromstring(profile_xml)
             print("DEBUG: XML parsed successfully")
         except ET.ParseError as e:
-            print(f"ERROR: Failed to parse XML*
+            print(f"ERROR: Failed to parse XML - {e}")
+            exit(1)
+        
+        ftp_profile = root.find(".//publishProfile[@publishMethod='FTP']")
+
+        if ftp_profile is not None:
+            user = ftp_profile.attrib.get('userName', '')
+            pwd = ftp_profile.attrib.get('userPWD', '')
+            url = ftp_profile.attrib.get('publishUrl', '')
+            
+            print(f"DEBUG: Found FTP profile")
+            print(f"DEBUG: Raw User: {user}")
+            print(f"DEBUG: URL: {url}")
+            
+            if not user or not pwd or not url:
+                print("ERROR: Missing FTP credentials")
+                exit(1)
+            
+            ftp_user = user.replace('\\', '/')
+            print(f"DEBUG: Converted User: {ftp_user}")
+            
+            with open(os.environ['GITHUB_ENV'], 'a') as env_file:
+                env_file.write(f"FTP_USER={ftp_user}\n")
+                env_file.write(f"FTP_PASS={pwd}\n")
+                env_file.write(f"FTP_URL={url}\n")
+            
+            print("DEBUG: Environment variables written")
+        else:
+            print('ERROR: Could not find FTP profile.')
+            exit(1)
+        PYTHON_EOF
+
+        if [ -f "$GITHUB_ENV" ]; then
+          source "$GITHUB_ENV"
+          echo "DEBUG: Environment loaded"
+        else
+          echo "ERROR: GITHUB_ENV file not found"
+          exit 1
+        fi
+
+        echo "DEBUG: FTP_URL = ${FTP_URL}"
+        echo "DEBUG: FTP_USER = ${FTP_USER:0:15}***"
+        
+        echo "Installing lftp..."
+        sudo apt-get update -qq > /dev/null 2>&1
+        sudo apt-get install -y lftp > /dev/null 2>&1
+        
+        echo "Starting FTP download from ${FTP_URL}..."
+        
+        lftp << LFTP_SCRIPT
+        set ftp:ssl-allow no
+        set ftp:passive-mode on
+        open -u "${FTP_USER},${FTP_PASS}" "${FTP_URL%/*}"
+        mirror -v "${FTP_URL##*/}" ./azure-content-backup
+        quit
+        LFTP_SCRIPT
+        
+        RESULT=$?
+        
+        if [ $RESULT -eq 0 ]; then
+          FILE_COUNT=$(find ./azure-content-backup -type f | wc -l)
+          echo "Download completed successfully"
+          echo "Files downloaded: $FILE_COUNT"
+        else
+          echo "ERROR: FTP download failed with code $RESULT"
+          exit 1
+        fi
+
+    - name: Commit and Push to GitHub
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@://github.com"
+        
+        git add ./azure-content-backup
+        if ! git diff --cached --quiet; then
+          git commit -m "Automated Azure App Service backup: $(date +'%Y-%m-%d %H:%M:%S')"
+          git push origin main
+        else
+          echo "No deployment changes detected on the App Service. Skipping commit."
+        fi
